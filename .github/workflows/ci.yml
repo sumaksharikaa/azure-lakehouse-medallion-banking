@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Delta Lake jars (Ivy)
+        uses: actions/cache@v4
+        with:
+          path: ~/.ivy2
+          key: ivy-delta-3.2.1-spark-3.5.3
+
+      - name: Install
+        run: pip install -e ".[local,dev]"
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Unit tests
+        run: pytest -q
+
+      - name: Delta Lake end-to-end tests
+        env:
+          LAKEHOUSE_DELTA_TESTS: "1"
+        run: pytest -q -m delta
+
+      - name: Build wheel
+        run: pip wheel . --no-deps -w dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
