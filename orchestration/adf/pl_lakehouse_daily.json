@@ -1,0 +1,82 @@
+{
+  "name": "pl_lakehouse_daily",
+  "properties": {
+    "description": "Daily Medallion load: Bronze -> Silver -> Gold on Azure Databricks. Each layer is idempotent, so ADF retries and manual re-runs for a batchDate are safe.",
+    "parameters": {
+      "batchDate": { "type": "string", "defaultValue": "@formatDateTime(adddays(utcnow(), -1), 'yyyy-MM-dd')" },
+      "storageRoot": { "type": "string", "defaultValue": "abfss://lakehouse@<storage-account>.dfs.core.windows.net" },
+      "alertWebhookUrl": { "type": "securestring" }
+    },
+    "activities": [
+      {
+        "name": "Bronze_Ingest",
+        "type": "DatabricksSparkPython",
+        "policy": { "timeout": "0.02:00:00", "retry": 2, "retryIntervalInSeconds": 300 },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "pythonFile": "dbfs:/lakehouse/jobs/run_pipeline.py",
+          "parameters": [
+            "--config", "/dbfs/lakehouse/conf/pipeline.yaml",
+            "--root", "@pipeline().parameters.storageRoot",
+            "--batch-date", "@pipeline().parameters.batchDate",
+            "--layers", "bronze"
+          ],
+          "libraries": [ { "whl": "dbfs:/lakehouse/wheels/azure_lakehouse_medallion_banking-1.0.0-py3-none-any.whl" } ]
+        }
+      },
+      {
+        "name": "Silver_Conform_DQ_Merge",
+        "type": "DatabricksSparkPython",
+        "dependsOn": [ { "activity": "Bronze_Ingest", "dependencyConditions": [ "Succeeded" ] } ],
+        "policy": { "timeout": "0.02:00:00", "retry": 2, "retryIntervalInSeconds": 300 },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "pythonFile": "dbfs:/lakehouse/jobs/run_pipeline.py",
+          "parameters": [
+            "--config", "/dbfs/lakehouse/conf/pipeline.yaml",
+            "--root", "@pipeline().parameters.storageRoot",
+            "--batch-date", "@pipeline().parameters.batchDate",
+            "--layers", "silver"
+          ],
+          "libraries": [ { "whl": "dbfs:/lakehouse/wheels/azure_lakehouse_medallion_banking-1.0.0-py3-none-any.whl" } ]
+        }
+      },
+      {
+        "name": "Gold_Build_Optimize",
+        "type": "DatabricksSparkPython",
+        "dependsOn": [ { "activity": "Silver_Conform_DQ_Merge", "dependencyConditions": [ "Succeeded" ] } ],
+        "policy": { "timeout": "0.02:00:00", "retry": 1, "retryIntervalInSeconds": 300 },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "pythonFile": "dbfs:/lakehouse/jobs/run_pipeline.py",
+          "parameters": [
+            "--config", "/dbfs/lakehouse/conf/pipeline.yaml",
+            "--root", "@pipeline().parameters.storageRoot",
+            "--batch-date", "@pipeline().parameters.batchDate",
+            "--layers", "gold"
+          ],
+          "libraries": [ { "whl": "dbfs:/lakehouse/wheels/azure_lakehouse_medallion_banking-1.0.0-py3-none-any.whl" } ]
+        }
+      },
+      {
+        "name": "Alert_On_Failure",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "Bronze_Ingest", "dependencyConditions": [ "Failed" ] },
+          { "activity": "Silver_Conform_DQ_Merge", "dependencyConditions": [ "Failed" ] },
+          { "activity": "Gold_Build_Optimize", "dependencyConditions": [ "Failed" ] }
+        ],
+        "typeProperties": {
+          "method": "POST",
+          "url": { "value": "@pipeline().parameters.alertWebhookUrl", "type": "Expression" },
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "value": "@json(concat('{\"pipeline\":\"', pipeline().Pipeline, '\",\"runId\":\"', pipeline().RunId, '\",\"batchDate\":\"', pipeline().parameters.batchDate, '\",\"status\":\"FAILED\"}'))",
+            "type": "Expression"
+          }
+        }
+      }
+    ],
+    "annotations": [ "medallion", "lakehouse", "banking" ]
+  }
+}

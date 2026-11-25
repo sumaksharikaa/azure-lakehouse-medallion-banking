@@ -1,0 +1,108 @@
+# Metadata-driven pipeline configuration.
+#
+# Adding a new source = adding an entry under `entities`. No code changes are
+# needed for ingestion, typing, data-quality rules or the silver load strategy.
+#
+# Paths are relative to `storage.root`, which can be a local folder, a
+# Databricks volume, or an ADLS Gen2 URI such as
+#   abfss://lakehouse@<storage-account>.dfs.core.windows.net
+# Override at runtime with the LAKEHOUSE_ROOT environment variable.
+
+storage:
+  root: ./data
+  landing: landing
+  bronze: lakehouse/bronze
+  silver: lakehouse/silver
+  gold: lakehouse/gold
+  quarantine: lakehouse/quarantine
+  audit: lakehouse/_audit/pipeline_runs
+
+# Static reference data used by gold. In production this would be a
+# daily FX feed; it is inlined here to keep the project self-contained.
+fx_rates_to_usd:
+  USD: 1.0
+  EUR: 1.08
+  GBP: 1.27
+  CAD: 0.73
+
+# Order matters: silver transactions validate against silver accounts.
+entities:
+  - name: customers
+    format: csv
+    read_options: { header: "true" }
+    business_keys: [customer_id]
+    load_type: scd2               # history preserved, one current row per key
+    sequence_column: updated_at   # resolves multiple changes for a key in one batch
+    cdc_op_column: op             # I / U / D
+    scd2_tracked_columns: [first_name, last_name, email, phone, city, state, segment, kyc_status]
+    schema:
+      customer_id: string
+      first_name: string
+      last_name: string
+      email: string
+      phone: string
+      city: string
+      state: string
+      segment: string
+      kyc_status: string
+      updated_at: timestamp
+    quality_rules:
+      - { name: customer_id_not_null, type: not_null, column: customer_id }
+      - { name: email_format, type: regex, column: email, pattern: '^[^@\s]+@[^@\s]+\.[a-z]{2,}$' }
+      - { name: segment_valid, type: accepted_values, column: segment, values: [MASS, AFFLUENT, PRIVATE] }
+      - { name: state_is_two_letters, type: regex, column: state, pattern: '^[A-Z]{2}$' }
+
+  - name: accounts
+    format: json
+    read_options: { mode: PERMISSIVE, columnNameOfCorruptRecord: _corrupt_record }
+    business_keys: [account_id]
+    load_type: scd1               # latest state wins
+    sequence_column: updated_at
+    schema:
+      account_id: string
+      customer_id: string
+      account_type: string
+      currency: string
+      status: string
+      opened_date: date
+      opening_balance: decimal(18,2)
+      credit_limit: decimal(18,2)
+      updated_at: timestamp
+    quality_rules:
+      - { name: not_corrupt, type: is_null, column: _corrupt_record }
+      - { name: account_id_not_null, type: not_null, column: account_id }
+      - { name: customer_id_not_null, type: not_null, column: customer_id }
+      - { name: account_type_valid, type: accepted_values, column: account_type, values: [CHECKING, SAVINGS, CREDIT_CARD, LOAN] }
+      - { name: status_valid, type: accepted_values, column: status, values: [ACTIVE, DORMANT, FROZEN, CLOSED] }
+      - { name: credit_limit_only_on_cards, type: expression, expr: "credit_limit IS NULL OR account_type = 'CREDIT_CARD'" }
+
+  - name: transactions
+    format: parquet
+    business_keys: [txn_id]
+    load_type: append_dedup       # insert-only, idempotent on the business key
+    sequence_column: txn_ts
+    partition_by: [txn_date]
+    derived_columns:
+      txn_date: "to_date(txn_ts)"
+    schema:
+      txn_id: string
+      account_id: string
+      txn_ts: timestamp
+      amount: decimal(18,2)
+      currency: string
+      txn_type: string
+      channel: string
+      merchant_category: string
+      description: string
+    quality_rules:
+      - { name: txn_id_not_null, type: not_null, column: txn_id }
+      - { name: account_id_not_null, type: not_null, column: account_id }
+      - { name: amount_positive, type: range, column: amount, min: 0.01 }
+      - { name: currency_supported, type: accepted_values, column: currency, values: [USD, EUR, GBP, CAD] }
+      - { name: txn_type_valid, type: accepted_values, column: txn_type, values: [DEBIT, CREDIT] }
+      - { name: account_exists, type: foreign_key, column: account_id, reference: accounts, reference_column: account_id }
+
+gold:
+  optimize:
+    fact_transactions: { zorder_by: [account_id] }
+    agg_daily_account_activity: { zorder_by: [account_id] }

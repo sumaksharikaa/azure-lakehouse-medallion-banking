@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azure-lakehouse-medallion-banking"
+version = "1.0.0"
+description = "Metadata-driven Medallion lakehouse (Bronze/Silver/Gold) on PySpark + Delta Lake for synthetic banking data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# pyspark/delta are provided by the Databricks runtime, so they are only required for local runs.
+dependencies = ["pyyaml>=6.0"]
+
+[project.optional-dependencies]
+local = ["pyspark==3.5.3", "delta-spark==3.2.1", "pyarrow>=14"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+lakehouse-pipeline = "lakehouse.pipeline:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["delta: end-to-end tests that need Delta Lake jars (set LAKEHOUSE_DELTA_TESTS=1)"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["src", "data_generator"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "SIM"]
